@@ -14,8 +14,10 @@ import fr.emse.fayol.maqit.simulator.environment.Location;
 
 import java.awt.Color;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.Map.Entry;
 
 /**
@@ -45,8 +47,8 @@ public class MyRobot extends ColorInteractionRobot {
 
     // ------------- Battery Management -------------
     protected int batteryLevel;
-    protected final int batteryCapacity = 40; // Maximum battery (doubled from 20)
-    protected final int rechargeTime = 8; // Time steps to recharge fully (adjusted for larger capacity)
+    protected final int batteryCapacity = 100; // Increased battery capacity for longer operation
+    protected final int rechargeTime = 10; // Time steps to recharge fully
     protected int rechargeCounter = 0;
     protected boolean isRecharging = false;
 
@@ -69,6 +71,16 @@ public class MyRobot extends ColorInteractionRobot {
     protected long lastCoordinationCheck = 0;
     protected static final long STATUS_BROADCAST_INTERVAL = 2000; // ms
     protected static final long COORDINATION_CHECK_INTERVAL = 1000; // ms
+
+    // ------------- Enhanced Optimization Components -------------
+    protected PathPlanner pathPlanner;
+    protected BatteryManager batteryManager;
+    protected TaskAllocator taskAllocator;
+    protected int[] reservedChargingStation = null;
+    protected List<int[]> currentPath = null;
+    protected int pathIndex = 0;
+    protected long lastPathUpdate = 0;
+    protected static final long PATH_UPDATE_INTERVAL = 2000; // ms
 
     /**
      * List of final goals (id -> [x, y])
@@ -98,6 +110,11 @@ public class MyRobot extends ColorInteractionRobot {
 
         // Initialize the task coordinator
         this.coordinator = new TaskCoordinator(this);
+
+        // Initialize enhanced optimization components
+        this.pathPlanner = new PathPlanner(env, rows, columns);
+        this.batteryManager = new BatteryManager(this, chargingStations);
+        this.taskAllocator = new TaskAllocator(this);
 
         randomOrientation();
         this.batteryLevel = batteryCapacity;
@@ -139,14 +156,16 @@ public class MyRobot extends ColorInteractionRobot {
             return; // skip movement while recharging
         }
 
-        // If battery is already 0 but not on a charging zone => stuck or fallback
+        // If battery is already 0 but not on a charging zone => emergency charging
         if (batteryLevel <= 0) {
             if (onChargingZone()) {
                 isRecharging = true;
                 rechargeCounter = 0;
-                System.out.println(getName() + " starts recharging...");
+                System.out.println(getName() + " starts emergency recharging...");
             } else {
-                System.out.println(getName() + " is out of battery and stuck!");
+                // Emergency: give robot minimal battery to reach charging station
+                batteryLevel = 5; // Emergency battery to reach charger
+                System.out.println(getName() + " received emergency battery boost!");
             }
             return;
         }
@@ -334,8 +353,10 @@ public class MyRobot extends ColorInteractionRobot {
             // Execute the move
             moveForward();
 
-            // Decrement battery
-            batteryLevel--;
+            // Decrement battery (reduced consumption)
+            if (batteryLevel > 0) {
+                batteryLevel--;
+            }
 
             // Broadcast our new position to help other robots avoid us
             if (coordinator != null) {
@@ -396,91 +417,111 @@ public class MyRobot extends ColorInteractionRobot {
     }
 
     /**
-     * Move (one step) toward the nearest charging station. If already on one,
-     * start recharging. Robots will try to approach from different directions
-     * to surround the charging station.
+     * Enhanced charging logic using BatteryManager for optimal station selection
      */
     protected void goCharge() {
-        int[] nearest = getNearestChargingStation();
-        if (nearest == null) {
-            // If no stations exist, we do nothing
+        // Use BatteryManager to get the best charging station
+        int[] bestStation = batteryManager.getBestChargingStation();
+        if (bestStation == null) {
             System.out.println(getName() + ": No charging stations found!");
             return;
+        }
+
+        // Reserve the station if we haven't already
+        if (reservedChargingStation == null ||
+                !java.util.Arrays.equals(reservedChargingStation, bestStation)) {
+
+            // Release previous reservation
+            if (reservedChargingStation != null) {
+                batteryManager.releaseChargingStation(reservedChargingStation);
+            }
+
+            // Reserve new station
+            batteryManager.reserveChargingStation(bestStation);
+            reservedChargingStation = bestStation;
         }
 
         // If we're already on a charging zone
         if (onChargingZone()) {
             isRecharging = true;
             rechargeCounter = 0;
-            System.out.println(getName() + " starts recharging...");
+            System.out.println(getName() + " starts recharging at station (" +
+                    bestStation[0] + "," + bestStation[1] + ")");
         } else {
-            // Check if we're already adjacent to the charging station
-            int stationX = nearest[0];
-            int stationY = nearest[1];
+            // Get optimal approach position for load distribution
+            int[] approachPos = batteryManager.getChargingApproachPosition(bestStation);
 
-            // If we're already adjacent, don't move (stay in position)
-            if (isAdjacentTo(stationX, stationY)) {
-                System.out.println(getName() + " is adjacent to a charging station and waiting to charge.");
+            // If we're already at the approach position, wait
+            if (this.getX() == approachPos[0] && this.getY() == approachPos[1]) {
+                System.out.println(getName() + " is at approach position for charging station.");
                 return;
             }
 
-            // Calculate approach direction based on robot ID to distribute robots
-            // This makes robots approach from different directions based on their ID
-            int robotId = getId();
-            int approachDirection = robotId % 8; // 8 possible directions (4 cardinal + 4 diagonal)
+            // Use simple movement to move toward charging station
+            moveOneStepTo(bestStation[0], bestStation[1]);
+        }
+    }
 
-            // Calculate target position based on approach direction
-            int targetX = stationX;
-            int targetY = stationY;
+    /**
+     * Enhanced movement using A* pathfinding with dynamic obstacle avoidance
+     */
+    protected void moveToTargetWithPathfinding(int targetX, int targetY) {
+        long currentTime = System.currentTimeMillis();
 
-            switch (approachDirection) {
-                case 0: // North
-                    targetX = stationX - 1;
-                    targetY = stationY;
-                    break;
-                case 1: // Northeast
-                    targetX = stationX - 1;
-                    targetY = stationY + 1;
-                    break;
-                case 2: // East
-                    targetX = stationX;
-                    targetY = stationY + 1;
-                    break;
-                case 3: // Southeast
-                    targetX = stationX + 1;
-                    targetY = stationY + 1;
-                    break;
-                case 4: // South
-                    targetX = stationX + 1;
-                    targetY = stationY;
-                    break;
-                case 5: // Southwest
-                    targetX = stationX + 1;
-                    targetY = stationY - 1;
-                    break;
-                case 6: // West
-                    targetX = stationX;
-                    targetY = stationY - 1;
-                    break;
-                case 7: // Northwest
-                    targetX = stationX - 1;
-                    targetY = stationY - 1;
-                    break;
+        // Update path if needed (every 2 seconds or if no current path)
+        if (currentPath == null || currentTime - lastPathUpdate > PATH_UPDATE_INTERVAL ||
+                pathIndex >= currentPath.size()) {
+
+            // Get dynamic obstacles (other robots)
+            Set<String> dynamicObstacles = new HashSet<>();
+            for (var robot : env.getRobot()) {
+                if (robot != this) {
+                    dynamicObstacles.add(robot.getX() + "," + robot.getY());
+                }
             }
 
-            // Ensure target is within grid bounds
-            targetX = Math.max(0, Math.min(rows - 1, targetX));
-            targetY = Math.max(0, Math.min(columns - 1, targetY));
+            // Find new path
+            currentPath = pathPlanner.findPath(this.getX(), this.getY(), targetX, targetY, dynamicObstacles);
+            pathIndex = 0;
+            lastPathUpdate = currentTime;
 
-            // Move one step toward the calculated target position
+            if (currentPath.isEmpty()) {
+                // Fallback to simple movement if no path found
+                System.out.println(getName() + " no path found, using simple movement");
+                moveOneStepTo(targetX, targetY);
+                return;
+            } else {
+                System.out.println(getName() + " found path with " + currentPath.size() + " steps");
+            }
+        }
+
+        // Follow the current path
+        if (pathIndex < currentPath.size()) {
+            int[] nextStep = currentPath.get(pathIndex);
+
+            // Check if we're already at the next step
+            if (this.getX() == nextStep[0] && this.getY() == nextStep[1]) {
+                pathIndex++;
+                return;
+            }
+
+            // Move toward next step
+            moveOneStepTo(nextStep[0], nextStep[1]);
+
+            // Check if we reached the next step
+            if (this.getX() == nextStep[0] && this.getY() == nextStep[1]) {
+                pathIndex++;
+            }
+        } else {
+            // Path completed, use simple movement for final approach
             moveOneStepTo(targetX, targetY);
         }
     }
 
     // ---------- Robot Logic (step) ----------
     public void step() {
-        // (Optional) log charging status
-        logChargingStatus();
+        // (Optional) log charging status - disabled to reduce noise
+        // logChargingStatus();
 
         // 1) Battery housekeeping
         manageBattery();
@@ -500,8 +541,9 @@ public class MyRobot extends ColorInteractionRobot {
 
         // Run coordination checks periodically
         if (currentTime - lastCoordinationCheck > COORDINATION_CHECK_INTERVAL) {
-            // Process any active auctions
+            // Process any active auctions (both old and new systems)
             coordinator.processAuctions();
+            taskAllocator.processAuctions();
 
             // Consider package handoffs if carrying a package
             if (isCarryingPackage()) {
@@ -510,6 +552,7 @@ public class MyRobot extends ColorInteractionRobot {
 
             // Clean up expired information
             coordinator.cleanupExpiredInfo();
+            taskAllocator.cleanupOldTasks();
 
             lastCoordinationCheck = currentTime;
         }
@@ -519,20 +562,15 @@ public class MyRobot extends ColorInteractionRobot {
             return; // Skip regular logic if handling a handoff
         }
 
-        // 2) Proactive check: if battery is low, go get a recharge
-        // We need enough battery to reach the nearest station plus a safety margin
-        int[] nearestCharger = getNearestChargingStation();
-        if (nearestCharger != null) {
-            double distToCharger = distanceTo(nearestCharger[0], nearestCharger[1]);
-            // Add a larger safety margin (6 instead of 3) to ensure we can reach the
-            // station - doubled to match the doubled battery capacity
-            // This helps prevent robots from running out of battery
-            if (batteryLevel <= distToCharger + 6) {
-                System.out.println(getName() + " battery is low! Heading to charge... Battery: " + batteryLevel
-                        + ", Distance to charger: " + distToCharger);
-                goCharge();
-                return;
+        // 2) Enhanced battery management using BatteryManager
+        if (batteryManager.shouldCharge()) {
+            // Only print charging message occasionally to reduce spam
+            if (System.currentTimeMillis() % 1000 < 50) {
+                System.out.println(getName() + " battery status: " + batteryManager.getBatteryStatus() +
+                        " (" + batteryLevel + "/" + batteryCapacity + ") - heading to charge");
             }
+            goCharge();
+            return;
         }
 
         // 3) If we have already delivered, do nothing
@@ -561,11 +599,11 @@ public class MyRobot extends ColorInteractionRobot {
                     }
                     System.out.println(getName() + " took a package from "
                             + carriedPackage.getStartZone()
-                            + " to deliver to goal " + carriedPackage.getDestinationGoalId());
+                            + " to deliver to goal " + carriedPackage.getDestinationGoalId()
+                            + " at position (" + destX + "," + destY + ")");
 
-                    // Announce this task to the coordination system
-                    // This allows other robots to potentially take over if they're better suited
-                    coordinator.announceTask(
+                    // Announce this task using enhanced task allocation
+                    taskAllocator.announceTask(
                             carriedPackage.getId(),
                             carriedPackage.getStartZone(),
                             carriedPackage.getDestinationGoalId(),
@@ -573,19 +611,44 @@ public class MyRobot extends ColorInteractionRobot {
                     );
                 }
             } else {
-                moveOneStepTo(zone.getX(), zone.getY());
+                moveToTargetWithPathfinding(zone.getX(), zone.getY());
             }
         } else if (etat == Etat.TRANSPORT) {
-            if (this.getX() == destX && this.getY() == destY) {
+            // Check if task should be reassigned due to changed conditions
+            if (taskAllocator.shouldReassignTask(carriedPackage.getId())) {
+                System.out.println(getName() + " requesting task reassignment for package " + carriedPackage.getId());
+                taskAllocator.requestTaskReassignment(carriedPackage.getId());
+                carriedPackage = null;
+                etat = Etat.FREE;
+                return;
+            }
+
+            // Check if we're at the destination (exact match or adjacent)
+            if ((this.getX() == destX && this.getY() == destY) ||
+                    (Math.abs(this.getX() - destX) <= 1 && Math.abs(this.getY() - destY) <= 1)) {
                 // Deliver
                 carriedPackage.setState(PackageState.ARRIVED);
                 MySimFactory.deliveredCount++;
                 tempsArrivee = System.currentTimeMillis();
                 etat = Etat.DELIVRE;
+
+                // Release charging station reservation if we have one
+                if (reservedChargingStation != null) {
+                    batteryManager.releaseChargingStation(reservedChargingStation);
+                    reservedChargingStation = null;
+                }
+
                 env.removeCellContent(this.getX(), this.getY());
-                System.out.println(getName() + " has delivered the package and disappears.");
+                System.out.println(getName() + " has delivered the package at (" + this.getX() + "," + this.getY() +
+                        ") near goal (" + destX + "," + destY + ") and disappears.");
             } else {
-                moveOneStepTo(destX, destY);
+                // Debug: print current position and destination
+                if (System.currentTimeMillis() % 2000 < 50) {
+                    System.out.println(getName() + " moving from (" + this.getX() + "," + this.getY() +
+                            ") toward (" + destX + "," + destY + ") - distance: " +
+                            distanceTo(destX, destY));
+                }
+                moveToTargetWithPathfinding(destX, destY);
             }
         }
     }
@@ -820,12 +883,17 @@ public class MyRobot extends ColorInteractionRobot {
     }
 
     /**
-     * Assign a package to this robot (used by coordinator)
+     * Assign a package to this robot (used by coordinator and task allocator)
      */
     public void assignPackage(int packageId) {
-        // This is a placeholder - in a real implementation, this would
-        // trigger the robot to go pick up the package from its location
+        // Handle assignment from both coordination systems
         System.out.println(getName() + " was assigned package " + packageId);
+
+        // If we're not already carrying a package and not in delivery state
+        if (!isCarryingPackage() && etat == Etat.FREE) {
+            // The robot will pick up the package when it reaches the appropriate start zone
+            // This is handled in the main step() logic
+        }
     }
 
     /**

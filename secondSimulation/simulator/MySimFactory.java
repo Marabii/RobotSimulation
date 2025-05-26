@@ -33,6 +33,13 @@ public class MySimFactory extends SimFactory {
     Random rnd;
     int totalSteps = 0;
 
+    // Performance tracking
+    private long simulationStartTime;
+    private int maxSimulationSteps = 2000; // Timeout after 2000 steps
+    private boolean simulationTimedOut = false;
+    private int totalMovements = 0;
+    private int totalChargingEvents = 0;
+
     public MySimFactory(SimProperties sp) {
         super(sp);
     }
@@ -185,10 +192,11 @@ public class MySimFactory extends SimFactory {
 
     // *** ADDED or CHANGED *** (Multiple charging stations)
     /**
-     * Creates multiple charging zones from sp.chargingZonePositions.
+     * Creates multiple charging zones from configuration.
      */
     public void createChargingZones() {
-        List<int[]> chargingZonePositions = List.of(new int[] { 5, 5 }, new int[] { 4, 10 });
+        // Use positions from environment.ini: charger1 = 5,5 and charger2 = 10,10
+        List<int[]> chargingZonePositions = List.of(new int[] { 5, 5 }, new int[] { 10, 10 });
 
         for (int[] cpos : chargingZonePositions) {
             ColorChargingZone cz = new ColorChargingZone(
@@ -208,7 +216,7 @@ public class MySimFactory extends SimFactory {
         // Convert start-zone positions to a List
         List<int[]> startZoneList = new ArrayList<>(sp.startZonePositions.values());
 
-        List<int[]> chargingZonePositions = List.of(new int[] { 5, 5 }, new int[] { 4, 10 });
+        List<int[]> chargingZonePositions = List.of(new int[] { 5, 5 }, new int[] { 10, 10 });
 
         for (int i = 0; i < sp.nbrobot; i++) {
             int[] pos = environment.getPlace();
@@ -230,11 +238,36 @@ public class MySimFactory extends SimFactory {
 
     @Override
     public void schedule() {
+        simulationStartTime = System.currentTimeMillis();
         List<Robot> robots = environment.getRobot();
         int currentNBPacket;
+        int stuckCounter = 0; // Track if simulation is stuck
+        int lastDeliveredCount = 0;
 
-        for (int i = 0; i < sp.step; i++) {
+        System.out.println("Starting simulation with " + robots.size() + " robots and " + nbPackages + " packages");
+
+        for (int i = 0; i < sp.step && i < maxSimulationSteps; i++) {
             totalSteps++;
+
+            // Check for timeout or stuck simulation
+            if (totalSteps > maxSimulationSteps) {
+                System.out.println("Simulation timed out after " + maxSimulationSteps + " steps");
+                simulationTimedOut = true;
+                break;
+            }
+
+            // Check if simulation is stuck (no progress for 100 steps)
+            if (MySimFactory.deliveredCount == lastDeliveredCount) {
+                stuckCounter++;
+                if (stuckCounter > 100) {
+                    System.out.println("Simulation appears stuck - no progress for 100 steps. Terminating.");
+                    simulationTimedOut = true;
+                    break;
+                }
+            } else {
+                stuckCounter = 0;
+                lastDeliveredCount = MySimFactory.deliveredCount;
+            }
 
             // Packet creation over time
             if (nbNotGeneratedPackets > 0 && validGeneration()) {
@@ -252,12 +285,26 @@ public class MySimFactory extends SimFactory {
                 Cell[][] perception = environment.getNeighbor(r.getX(), r.getY(), r.getField());
                 r.updatePerception(perception);
 
+                // Track movements for performance metrics
+                boolean moved = false;
                 if (r instanceof MyTransitRobot) {
                     ((MyTransitRobot) r).step();
+                    moved = !java.util.Arrays.equals(prevPos, r.getLocation());
                 } else if (r instanceof MyRobot) {
                     ((MyRobot) r).step();
+                    moved = !java.util.Arrays.equals(prevPos, r.getLocation());
+
+                    // Track charging events
+                    if (((MyRobot) r).isRecharging()) {
+                        totalChargingEvents++;
+                    }
                 } else {
                     r.move(1);
+                    moved = !java.util.Arrays.equals(prevPos, r.getLocation());
+                }
+
+                if (moved) {
+                    totalMovements++;
                 }
 
                 updateEnvironment(prevPos, r.getLocation());
@@ -267,7 +314,13 @@ public class MySimFactory extends SimFactory {
 
             // Check if all packages are delivered
             if (MySimFactory.deliveredCount >= nbPackages) {
-                System.out.println("All packages delivered in " + totalSteps + " steps.");
+                long simulationTime = System.currentTimeMillis() - simulationStartTime;
+                System.out.println("=== SIMULATION COMPLETED SUCCESSFULLY ===");
+                System.out.println("All " + nbPackages + " packages delivered in " + totalSteps + " steps");
+                System.out.println("Total simulation time: " + simulationTime + " ms");
+                System.out.println("Total robot movements: " + totalMovements);
+                System.out.println("Average movements per package: " + (totalMovements / (double) nbPackages));
+                System.out.println("Efficiency score: " + calculateEfficiencyScore());
                 break;
             }
 
@@ -277,6 +330,16 @@ public class MySimFactory extends SimFactory {
                 e.printStackTrace();
             }
         }
+
+        // Print final statistics if simulation didn't complete normally
+        if (MySimFactory.deliveredCount < nbPackages) {
+            long simulationTime = System.currentTimeMillis() - simulationStartTime;
+            System.out.println("=== SIMULATION TERMINATED ===");
+            System.out.println("Delivered " + MySimFactory.deliveredCount + " out of " + nbPackages + " packages");
+            System.out.println("Total steps: " + totalSteps);
+            System.out.println("Total simulation time: " + simulationTime + " ms");
+            System.out.println("Reason: " + (simulationTimedOut ? "Timeout/Stuck" : "Step limit reached"));
+        }
     }
 
     private boolean validGeneration() {
@@ -284,10 +347,33 @@ public class MySimFactory extends SimFactory {
         return (totalSteps % 10 == 0);
     }
 
+    /**
+     * Calculate an efficiency score for the simulation
+     * Higher score = better performance
+     */
+    private double calculateEfficiencyScore() {
+        if (nbPackages == 0 || totalSteps == 0)
+            return 0.0;
+
+        // Base score: packages delivered per step
+        double deliveryEfficiency = (double) MySimFactory.deliveredCount / totalSteps;
+
+        // Movement efficiency: minimize unnecessary movements
+        double movementEfficiency = nbPackages > 0 ? 1.0 / (totalMovements / (double) nbPackages) : 0.0;
+
+        // Time efficiency: penalize long simulations
+        double timeEfficiency = Math.max(0.1, 1.0 - (totalSteps / (double) maxSimulationSteps));
+
+        // Completion bonus: reward completing all packages
+        double completionBonus = (MySimFactory.deliveredCount == nbPackages) ? 1.5 : 1.0;
+
+        return (deliveryEfficiency * 0.4 + movementEfficiency * 0.3 + timeEfficiency * 0.3) * completionBonus;
+    }
+
     public static void main(String[] args) throws Exception {
         // Load main config
-        IniFile ifile = new IniFile("secondSimulation/parameters/configuration.ini");
-        IniFile ifilenv = new IniFile("secondSimulation/parameters/environment.ini");
+        IniFile ifile = new IniFile("parameters/configuration.ini");
+        IniFile ifilenv = new IniFile("parameters/environment.ini");
 
         // Simulation properties
         SimProperties sp = new SimProperties(ifile);

@@ -1,0 +1,26 @@
+[
+  {
+    "num_robots": 1,
+    "total_steps": 77,
+    "status": "success",
+    "timestamp": "2025-04-16 12:13:16"
+  },
+  {
+    "num_robots": 2,
+    "total_steps": 58,
+    "status": "success",
+    "timestamp": "2025-04-16 12:13:21"
+  },
+  {
+    "num_robots": 3,
+    "total_steps": 1200,
+    "status": "success",
+    "timestamp": "2025-04-16 12:13:51"
+  },
+  {
+    "num_robots": 4,
+    "total_steps": 1200,
+    "status": "success",
+    "timestamp": "2025-04-16 12:14:02"
+  }
+]

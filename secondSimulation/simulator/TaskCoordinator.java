@@ -372,33 +372,41 @@ public class TaskCoordinator {
     private void handleTaskAnnouncement(CoordinationMessage msg) {
         // Parse task data
         String data = msg.getData();
-        // Simple parsing (in a real system, use a proper JSON parser)
-        int packageId = Integer.parseInt(data.split("\"packageId\":")[1].split(",")[0]);
-        String startZone = data.split("\"startZone\":\"")[1].split("\"")[0];
-        int destinationId = Integer.parseInt(data.split("\"destinationId\":")[1].split(",")[0]);
-        double urgency = Double.parseDouble(data.split("\"urgency\":")[1].split("}")[0]);
+        try {
+            // Simple parsing (in a real system, use a proper JSON parser)
+            int packageId = Integer.parseInt(data.split("\"packageId\":")[1].split(",")[0]);
+            String startZone = data.split("\"startZone\":\"")[1].split("\"")[0];
+            int destinationId = Integer.parseInt(data.split("\"destinationId\":")[1].split(",")[0]);
+            double urgency = Double.parseDouble(data.split("\"urgency\":")[1].split("}")[0]);
 
-        // Store the task
-        TaskInfo task = new TaskInfo(packageId, startZone, destinationId, urgency, System.currentTimeMillis());
-        task.announcer = msg.getEmitter();
-        knownTasks.put(packageId, task);
+            // Store the task
+            TaskInfo task = new TaskInfo(packageId, startZone, destinationId, urgency, System.currentTimeMillis());
+            task.announcer = msg.getEmitter();
+            knownTasks.put(packageId, task);
 
-        // Submit a bid for this task
-        submitBid(packageId);
+            // Submit a bid for this task
+            submitBid(packageId);
+        } catch (Exception e) {
+            System.out.println("Error parsing task announcement: " + data);
+        }
     }
 
     private void handleTaskBid(CoordinationMessage msg) {
         // Parse bid data
         String data = msg.getData();
-        int packageId = Integer.parseInt(data.split("\"packageId\":")[1].split(",")[0]);
-        double fitness = Double.parseDouble(data.split("\"fitness\":")[1].split(",")[0]);
-        double batteryLevel = Double.parseDouble(data.split("\"batteryLevel\":")[1].split(",")[0]);
+        try {
+            int packageId = Integer.parseInt(data.split("\"packageId\":")[1].split(",")[0]);
+            double fitness = Double.parseDouble(data.split("\"fitness\":")[1].split(",")[0]);
+            double batteryLevel = Double.parseDouble(data.split("\"batteryLevel\":")[1].split(",")[0]);
 
-        // Store the bid if we're tracking this auction
-        List<TaskBid> bids = activeBids.get(packageId);
-        if (bids != null) {
-            TaskBid bid = new TaskBid(msg.getEmitter(), packageId, fitness, batteryLevel);
-            bids.add(bid);
+            // Store the bid if we're tracking this auction
+            List<TaskBid> bids = activeBids.get(packageId);
+            if (bids != null) {
+                TaskBid bid = new TaskBid(msg.getEmitter(), packageId, fitness, batteryLevel);
+                bids.add(bid);
+            }
+        } catch (Exception e) {
+            System.out.println("Error parsing task bid: " + data);
         }
     }
 
@@ -425,23 +433,27 @@ public class TaskCoordinator {
     private void handlePositionUpdate(CoordinationMessage msg) {
         // Parse position data
         String data = msg.getData();
-        int robotId = msg.getEmitter();
-        int x = Integer.parseInt(data.split("\"x\":")[1].split(",")[0]);
-        int y = Integer.parseInt(data.split("\"y\":")[1].split(",")[0]);
-        int destX = Integer.parseInt(data.split("\"destX\":")[1].split(",")[0]);
-        int destY = Integer.parseInt(data.split("\"destY\":")[1].split(",")[0]);
-        boolean hasPackage = Boolean.parseBoolean(data.split("\"hasPackage\":")[1].split("}")[0]);
+        try {
+            int robotId = msg.getEmitter();
+            int x = Integer.parseInt(data.split("\"x\":")[1].split(",")[0]);
+            int y = Integer.parseInt(data.split("\"y\":")[1].split(",")[0]);
+            int destX = Integer.parseInt(data.split("\"destX\":")[1].split(",")[0]);
+            int destY = Integer.parseInt(data.split("\"destY\":")[1].split(",")[0]);
+            boolean hasPackage = Boolean.parseBoolean(data.split("\"hasPackage\":")[1].split("}")[0]);
 
-        // Update or create robot info
-        RobotInfo robot = knownRobots.getOrDefault(robotId, new RobotInfo(robotId));
-        robot.x = x;
-        robot.y = y;
-        robot.destX = destX;
-        robot.destY = destY;
-        robot.hasPackage = hasPackage;
-        robot.lastUpdate = System.currentTimeMillis();
+            // Update or create robot info
+            RobotInfo robot = knownRobots.getOrDefault(robotId, new RobotInfo(robotId));
+            robot.x = x;
+            robot.y = y;
+            robot.destX = destX;
+            robot.destY = destY;
+            robot.hasPackage = hasPackage;
+            robot.lastUpdate = System.currentTimeMillis();
 
-        knownRobots.put(robotId, robot);
+            knownRobots.put(robotId, robot);
+        } catch (Exception e) {
+            System.out.println("Error parsing position update: " + data);
+        }
     }
 
     private void handleZoneStatus(CoordinationMessage msg) {
@@ -533,14 +545,21 @@ public class TaskCoordinator {
     private void handlePathConflict(CoordinationMessage msg) {
         // Parse conflict data
         String data = msg.getData();
-        int x = Integer.parseInt(data.split("\"x\":")[1].split(",")[0]);
-        int y = Integer.parseInt(data.split("\"y\":")[1].split(",")[0]);
+        try {
+            int x = Integer.parseInt(data.split("\"x\":")[1].split(",")[0]);
+            int y = Integer.parseInt(data.split("\"y\":")[1].split("}")[0]);
+
+            handleConflictLogic(x, y, msg.getEmitter());
+        } catch (Exception e) {
+            System.out.println("Error parsing path conflict message: " + data);
+            return;
+        }
+    }
+
+    private void handleConflictLogic(int x, int y, int conflictRobotId) {
 
         // If we're heading to this location, adjust our path
         if (owner.getDestX() == x && owner.getDestY() == y) {
-            // Check if the conflict is with a robot that has higher priority
-            int conflictRobotId = msg.getEmitter();
-
             // Determine priority based on robot ID and battery level
             // Lower ID gets priority, but higher battery can override
             boolean shouldYield = false;
