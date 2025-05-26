@@ -47,8 +47,8 @@ public class MyRobot extends ColorInteractionRobot {
 
     // ------------- Battery Management -------------
     protected int batteryLevel;
-    protected final int batteryCapacity = 100; // Increased battery capacity for longer operation
-    protected final int rechargeTime = 10; // Time steps to recharge fully
+    protected final int batteryCapacity = 150; // Moderately increased battery capacity for longer operation
+    protected final int rechargeTime = 12; // Slightly longer recharge time for larger battery
     protected int rechargeCounter = 0;
     protected boolean isRecharging = false;
 
@@ -81,6 +81,11 @@ public class MyRobot extends ColorInteractionRobot {
     protected int pathIndex = 0;
     protected long lastPathUpdate = 0;
     protected static final long PATH_UPDATE_INTERVAL = 2000; // ms
+
+    // ------------- Timeout and Task Management -------------
+    protected long currentTaskStartTime = 0;
+    protected static final long TASK_TIMEOUT = 60000; // 1 minute timeout for tasks
+    protected boolean taskTimedOut = false;
 
     /**
      * List of final goals (id -> [x, y])
@@ -139,9 +144,10 @@ public class MyRobot extends ColorInteractionRobot {
     /**
      * Main battery logic:
      * - If already recharging, count down until done.
-     * - If battery hits 0 away from charger, we allow "stuck" or we can do
-     * fallback.
+     * - If battery hits 0 away from charger, robot becomes stranded (no emergency
+     * boost).
      * - If on a charging zone, stay until fully recharged.
+     * - Robots must be fully charged before leaving charging stations.
      */
     protected void manageBattery() {
         if (isRecharging) {
@@ -151,21 +157,25 @@ public class MyRobot extends ColorInteractionRobot {
                 batteryLevel = batteryCapacity;
                 isRecharging = false;
                 rechargeCounter = 0;
-                System.out.println(getName() + " has recharged fully.");
+                System.out.println(getName() + " has recharged fully and can now leave the charging station.");
             }
             return; // skip movement while recharging
         }
 
-        // If battery is already 0 but not on a charging zone => emergency charging
+        // If battery is 0 and not on a charging zone => robot is stranded
         if (batteryLevel <= 0) {
             if (onChargingZone()) {
                 isRecharging = true;
                 rechargeCounter = 0;
-                System.out.println(getName() + " starts emergency recharging...");
+                System.out.println(getName() + " starts emergency recharging at charging station...");
             } else {
-                // Emergency: give robot minimal battery to reach charging station
-                batteryLevel = 5; // Emergency battery to reach charger
-                System.out.println(getName() + " received emergency battery boost!");
+                // Robot is stranded - no emergency battery boost
+                System.out.println(getName() + " is stranded with no battery! Robot cannot move.");
+                // Mark task as failed if carrying a package
+                if (isCarryingPackage()) {
+                    System.out.println(getName() + " failed to deliver package due to battery depletion.");
+                    taskTimedOut = true;
+                }
             }
             return;
         }
@@ -417,14 +427,26 @@ public class MyRobot extends ColorInteractionRobot {
     }
 
     /**
-     * Enhanced charging logic using BatteryManager for optimal station selection
+     * Enhanced charging logic with alternative path finding and safety checks
      */
     protected void goCharge() {
+        // First check if we can reach any charging station
+        if (!batteryManager.canReachAnyChargingStation()) {
+            System.out.println(getName() + " cannot reach any charging station with current battery!");
+            // Robot is effectively stranded
+            return;
+        }
+
         // Use BatteryManager to get the best charging station
         int[] bestStation = batteryManager.getBestChargingStation();
+
+        // If primary station is not available, try alternative
         if (bestStation == null) {
-            System.out.println(getName() + ": No charging stations found!");
-            return;
+            bestStation = batteryManager.findAlternativeChargingPath();
+            if (bestStation == null) {
+                System.out.println(getName() + ": No charging stations available!");
+                return;
+            }
         }
 
         // Reserve the station if we haven't already
@@ -457,13 +479,14 @@ public class MyRobot extends ColorInteractionRobot {
                 return;
             }
 
-            // Use simple movement to move toward charging station
-            moveOneStepTo(bestStation[0], bestStation[1]);
+            // Use battery-aware pathfinding to move toward charging station
+            moveToTargetWithPathfinding(bestStation[0], bestStation[1]);
         }
     }
 
     /**
-     * Enhanced movement using A* pathfinding with dynamic obstacle avoidance
+     * Enhanced movement using A* pathfinding with battery-aware dynamic obstacle
+     * avoidance
      */
     protected void moveToTargetWithPathfinding(int targetX, int targetY) {
         long currentTime = System.currentTimeMillis();
@@ -480,18 +503,41 @@ public class MyRobot extends ColorInteractionRobot {
                 }
             }
 
-            // Find new path
-            currentPath = pathPlanner.findPath(this.getX(), this.getY(), targetX, targetY, dynamicObstacles);
+            // Use battery-aware pathfinding with safety margin
+            currentPath = pathPlanner.findBatteryAwarePath(
+                    this.getX(), this.getY(), targetX, targetY,
+                    dynamicObstacles, batteryLevel, 1.2);
+
             pathIndex = 0;
             lastPathUpdate = currentTime;
 
             if (currentPath.isEmpty()) {
-                // Fallback to simple movement if no path found
-                System.out.println(getName() + " no path found, using simple movement");
-                moveOneStepTo(targetX, targetY);
-                return;
+                // Check if we have enough battery for simple movement
+                double directDistance = distanceTo(targetX, targetY);
+                double requiredBattery = directDistance * 1.2; // Reduced safety margin for fallback
+
+                if (batteryLevel >= requiredBattery) {
+                    System.out.println(getName() + " no battery-safe path found, using simple movement (need " +
+                            requiredBattery + ", have " + batteryLevel + ")");
+                    moveOneStepTo(targetX, targetY);
+                    return;
+                } else if (batteryLevel >= directDistance) {
+                    // Even more aggressive fallback - just try to move if we have enough for direct
+                    // distance
+                    System.out.println(getName() + " using aggressive fallback movement (need " +
+                            directDistance + ", have " + batteryLevel + ")");
+                    moveOneStepTo(targetX, targetY);
+                    return;
+                } else {
+                    System.out.println(getName() + " insufficient battery for any movement (need " +
+                            directDistance + ", have " + batteryLevel + "), going to charge");
+                    goCharge();
+                    return;
+                }
             } else {
-                System.out.println(getName() + " found path with " + currentPath.size() + " steps");
+                double pathCost = pathPlanner.calculatePathBatteryCost(currentPath);
+                System.out.println(getName() + " found battery-safe path with " + currentPath.size() +
+                        " steps (cost: " + pathCost + " battery)");
             }
         }
 
@@ -562,8 +608,27 @@ public class MyRobot extends ColorInteractionRobot {
             return; // Skip regular logic if handling a handoff
         }
 
-        // 2) Enhanced battery management using BatteryManager
+        // 2) Check for task timeout
+        if (currentTaskStartTime > 0 && currentTime - currentTaskStartTime > TASK_TIMEOUT) {
+            System.out.println(getName() + " task timed out after " + TASK_TIMEOUT + "ms. Abandoning current task.");
+            taskTimedOut = true;
+            if (isCarryingPackage()) {
+                // Drop the package and return to free state
+                carriedPackage = null;
+                etat = Etat.FREE;
+            }
+            currentTaskStartTime = 0;
+        }
+
+        // 3) Enhanced battery management using BatteryManager with route validation
         if (batteryManager.shouldCharge()) {
+            // If carrying a package and low on battery, try handoff first
+            if (isCarryingPackage() && !isInitiatingHandoff && !isWaitingForHandoff) {
+                if (attemptPackageHandoff()) {
+                    return; // Handoff initiated, continue with handoff process
+                }
+            }
+
             // Only print charging message occasionally to reduce spam
             if (System.currentTimeMillis() % 1000 < 50) {
                 System.out.println(getName() + " battery status: " + batteryManager.getBatteryStatus() +
@@ -573,16 +638,33 @@ public class MyRobot extends ColorInteractionRobot {
             return;
         }
 
+        // 4) Validate route before starting any new task (only for FREE robots)
+        if (etat == Etat.FREE && !taskTimedOut) {
+            ColorStartZone zone = findStartZoneWithPackage();
+            if (zone != null) {
+                // Validate that we can complete the entire route before starting
+                if (!batteryManager.canCompleteFullRoute(zone.getX(), zone.getY(),
+                        zone.getPackages().get(0).getDestinationGoalId())) {
+                    System.out.println(getName() + " cannot complete route to package at (" + zone.getX() + ","
+                            + zone.getY() + ") - insufficient battery");
+                    // Go charge instead of attempting the task
+                    goCharge();
+                    return;
+                }
+            }
+        }
+
         // 3) If we have already delivered, do nothing
         if (etat == Etat.DELIVRE) {
             return;
         }
 
-        // 4) Otherwise: pick from start zone, or deliver
-        if (etat == Etat.FREE) {
+        // 5) Otherwise: pick from start zone, or deliver
+        if (etat == Etat.FREE && !taskTimedOut) {
             ColorStartZone zone = findStartZoneWithPackage();
             if (zone == null) {
                 // No package is available, do nothing
+                taskTimedOut = false; // Reset timeout flag when no tasks available
                 return;
             }
             if (isAdjacentTo(zone.getX(), zone.getY())) {
@@ -591,6 +673,9 @@ public class MyRobot extends ColorInteractionRobot {
                     zone.removePackage(carriedPackage);
 
                     tempsDepart = System.currentTimeMillis();
+                    currentTaskStartTime = tempsDepart; // Start timeout tracking
+                    taskTimedOut = false; // Reset timeout flag
+
                     int[] goalPos = GOALS.get(carriedPackage.getDestinationGoalId());
                     if (goalPos != null) {
                         destX = goalPos[0];
@@ -611,8 +696,15 @@ public class MyRobot extends ColorInteractionRobot {
                     );
                 }
             } else {
-                moveToTargetWithPathfinding(zone.getX(), zone.getY());
+                // Temporarily use simple movement to test core improvements
+                moveOneStepTo(zone.getX(), zone.getY());
             }
+        } else if (taskTimedOut) {
+            // Reset timeout flag and go charge to recover
+            System.out.println(getName() + " recovering from timeout - going to charge");
+            taskTimedOut = false;
+            goCharge();
+            return;
         } else if (etat == Etat.TRANSPORT) {
             // Check if task should be reassigned due to changed conditions
             if (taskAllocator.shouldReassignTask(carriedPackage.getId())) {
@@ -648,7 +740,8 @@ public class MyRobot extends ColorInteractionRobot {
                             ") toward (" + destX + "," + destY + ") - distance: " +
                             distanceTo(destX, destY));
                 }
-                moveToTargetWithPathfinding(destX, destY);
+                // Temporarily use simple movement to test core improvements
+                moveOneStepTo(destX, destY);
             }
         }
     }
@@ -878,6 +971,82 @@ public class MyRobot extends ColorInteractionRobot {
 
         // Reset handoff state
         isWaitingForHandoff = false;
+
+        System.out.println(getName() + " received package " + pkg.getId() + " via handoff");
+        return true;
+    }
+
+    /**
+     * Find a suitable robot for package handoff
+     * Returns the robot that can best complete the delivery
+     */
+    public MyRobot findSuitableHandoffRobot() {
+        if (!isCarryingPackage()) {
+            return null;
+        }
+
+        MyRobot bestRobot = null;
+        double bestScore = Double.MAX_VALUE;
+
+        for (var r : env.getRobot()) {
+            if (r != this && r instanceof MyRobot) {
+                MyRobot candidate = (MyRobot) r;
+
+                // Skip if robot is already carrying a package or recharging
+                if (candidate.isCarryingPackage() || candidate.isRecharging()) {
+                    continue;
+                }
+
+                // Skip if robot is too far away
+                double distanceToCandidate = distanceTo(candidate.getX(), candidate.getY());
+                if (distanceToCandidate > 10) { // Max handoff distance
+                    continue;
+                }
+
+                // Check if candidate can complete the delivery
+                double distanceToDestination = candidate.distanceTo(destX, destY);
+                double batteryNeeded = distanceToDestination * 1.2; // Small buffer
+
+                if (candidate.getBatteryLevel() < batteryNeeded) {
+                    continue; // Candidate can't complete delivery either
+                }
+
+                // Calculate score (lower is better)
+                double score = distanceToCandidate + (distanceToDestination * 0.5);
+
+                if (score < bestScore) {
+                    bestScore = score;
+                    bestRobot = candidate;
+                }
+            }
+        }
+
+        return bestRobot;
+    }
+
+    /**
+     * Attempt to handoff package to another robot
+     * Returns true if handoff was initiated
+     */
+    public boolean attemptPackageHandoff() {
+        if (!isCarryingPackage()) {
+            return false;
+        }
+
+        MyRobot targetRobot = findSuitableHandoffRobot();
+        if (targetRobot == null) {
+            return false;
+        }
+
+        // Initiate handoff
+        System.out.println(getName() + " initiating handoff of package " + carriedPackage.getId() +
+                " to " + targetRobot.getName() + " due to low battery");
+
+        // Set handoff target for the receiving robot
+        targetRobot.setHandoffTarget(this.getX(), this.getY(), carriedPackage.getId(), this.getId());
+
+        // Start our handoff process
+        initiateHandoff(targetRobot.getId());
 
         return true;
     }

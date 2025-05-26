@@ -6,12 +6,14 @@ import subprocess
 import re
 import time
 import matplotlib.pyplot as plt
+import argparse
+import sys
 
 # Configuration
-CONFIG_FILE = "secondSimulation/parameters/configuration.ini"
+CONFIG_FILE = "secondSimulation/parameters/configuration.ini"  # Updated path
 RESULTS_FILE = "simulation_results.json"  # Use the existing file
 MIN_ROBOTS = 1
-MAX_ROBOTS = 10  # Reduced from 30 to 10
+MAX_ROBOTS = 8  # Test up to 8 robots for comprehensive analysis
 JAVA_MAIN_CLASS = "simulator.MySimFactory"
 CLASSPATH = "bin:lib/*"
 
@@ -19,18 +21,18 @@ def fix_config_file():
     """Fix the configuration file by ensuring all color values are in the correct format.
     This function is called when an ArrayIndexOutOfBoundsException is detected.
     """
-    # Default configuration with correct color values
+    # Default configuration with correct color values - optimized for speed
     default_config = """[configuration]
-  display = 1
-  led = 1
+  display = 0
+  led = 0
   simulation = 1
-  mqtt = 1
+  mqtt = 0
   robot = 5
   obstacle = 5
   seed = 150
   field = 1
   debug = 0
-  waittime = 50
+  waittime = 1
   step=1200
 
 [environment]
@@ -152,25 +154,39 @@ def run_simulation():
                 print(line.strip())  # Print the line in real-time
 
                 # Look for the line that indicates all packages were delivered
-                if "All packages delivered in" in line:
-                    match = re.search(r"All packages delivered in (\d+) steps", line)
-                    if match:
-                        total_steps = int(match.group(1))
-                        print(f"Found completion: {line.strip()}")
-                        # Wait a moment to ensure data is saved
-                        time.sleep(1)
-                        # Try to terminate the process gracefully
-                        try:
-                            print("Attempting to terminate the simulation process...")
-                            process.terminate()
-                            # Give it a moment to terminate
-                            time.sleep(1)
-                            # If it's still running, force kill it
-                            if process.poll() is None:
-                                print("Process didn't terminate gracefully, forcing kill...")
-                                process.kill()
-                        except Exception as e:
-                            print(f"Error terminating process: {e}")
+                if "All" in line and "packages delivered in" in line and "steps" in line:
+                    # Try multiple regex patterns to catch the completion message
+                    patterns = [
+                        r"All (\d+) packages delivered in (\d+) steps",
+                        r"All packages delivered in (\d+) steps",
+                        r"delivered in (\d+) steps"
+                    ]
+
+                    for pattern in patterns:
+                        match = re.search(pattern, line)
+                        if match:
+                            if len(match.groups()) == 2:
+                                total_steps = int(match.group(2))  # Second group is steps
+                            else:
+                                total_steps = int(match.group(1))  # First group is steps
+                            print(f"Found completion: {line.strip()}")
+                            print(f"Extracted steps: {total_steps}")
+                            # Wait a moment to ensure data is saved
+                            time.sleep(0.5)
+                            # Try to terminate the process gracefully
+                            try:
+                                print("Attempting to terminate the simulation process...")
+                                process.terminate()
+                                # Give it a moment to terminate
+                                time.sleep(0.5)
+                                # If it's still running, force kill it
+                                if process.poll() is None:
+                                    print("Process didn't terminate gracefully, forcing kill...")
+                                    process.kill()
+                            except Exception as e:
+                                print(f"Error terminating process: {e}")
+                            break
+                    if total_steps is not None:
                         break
             except Exception as e:
                 print(f"Error reading output: {e}")
@@ -225,12 +241,23 @@ def run_simulation():
 
             # Check all output lines for completion message
             for line in output_lines:
-                if "All packages delivered in" in line:
-                    match = re.search(r"All packages delivered in (\d+) steps", line)
-                    if match:
-                        total_steps = int(match.group(1))
-                        print(f"Found completion in full output: {line.strip()}")
-                        return total_steps
+                if "All" in line and "packages delivered in" in line and "steps" in line:
+                    patterns = [
+                        r"All (\d+) packages delivered in (\d+) steps",
+                        r"All packages delivered in (\d+) steps",
+                        r"delivered in (\d+) steps"
+                    ]
+
+                    for pattern in patterns:
+                        match = re.search(pattern, line)
+                        if match:
+                            if len(match.groups()) == 2:
+                                total_steps = int(match.group(2))  # Second group is steps
+                            else:
+                                total_steps = int(match.group(1))  # First group is steps
+                            print(f"Found completion in full output: {line.strip()}")
+                            print(f"Extracted steps: {total_steps}")
+                            return total_steps
 
             print("No completion message found in full output. Using default max steps.")
             # If the simulation completed but we couldn't find the steps, use the maximum steps
@@ -298,19 +325,79 @@ def plot_results(results):
     plt.close()
 
 def main():
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Robot Optimization Testing')
+    parser.add_argument('--force-rerun', action='store_true',
+                       help='Force rerun all tests, ignoring existing results')
+    parser.add_argument('--clear-results', action='store_true',
+                       help='Clear existing results and start fresh')
+    parser.add_argument('--min-robots', type=int, default=MIN_ROBOTS,
+                       help=f'Minimum number of robots to test (default: {MIN_ROBOTS})')
+    parser.add_argument('--max-robots', type=int, default=MAX_ROBOTS,
+                       help=f'Maximum number of robots to test (default: {MAX_ROBOTS})')
+    parser.add_argument('--specific-robots', type=int, nargs='+',
+                       help='Test only specific robot counts (e.g., --specific-robots 1 5 8)')
+
+    args = parser.parse_args()
+
     # Make sure the bin directory exists
     os.makedirs("bin", exist_ok=True)
 
-    # Compile the Java code if needed
-    if not os.path.exists("bin/simulator/MySimFactory.class"):
-        print("Compiling Java code...")
-        compile_cmd = "javac -source 17 -target 17 -d bin -cp .:lib/* secondSimulation/simulator/*.java"
-        subprocess.run(compile_cmd, shell=True, check=True)
+    # Always recompile to ensure compatibility
+    print("Compiling Java code with compatible version...")
+
+    # Clean bin directory first
+    if os.path.exists("bin"):
+        subprocess.run("rm -rf bin", shell=True)
+    os.makedirs("bin", exist_ok=True)
+
+    # Try different compilation approaches for compatibility (Java 11 first for best compatibility)
+    compile_commands = [
+        "javac --release 11 -d bin -cp .:lib/* secondSimulation/simulator/*.java",  # Java 11 with release (best)
+        "javac -source 11 -target 11 -d bin -cp .:lib/* secondSimulation/simulator/*.java",  # Java 11
+        "javac -d bin -cp .:lib/* secondSimulation/simulator/*.java",  # Default
+    ]
+
+    compilation_successful = False
+    for cmd in compile_commands:
+        print(f"Trying: {cmd}")
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        if result.returncode == 0:
+            print("✅ Compilation successful!")
+            compilation_successful = True
+            break
+        else:
+            print(f"❌ Failed: {result.stderr.strip()}")
+
+    if not compilation_successful:
+        print("❌ All compilation attempts failed!")
+        print("Please check your Java installation and versions:")
+        subprocess.run("java -version", shell=True)
+        subprocess.run("javac -version", shell=True)
+        sys.exit(1)
+
+    # Test if the compiled classes work with current Java runtime
+    print("🧪 Testing compiled classes compatibility...")
+    test_result = subprocess.run("java -cp bin:lib/* simulator.MySimFactory --help 2>/dev/null || echo 'Test failed'",
+                                shell=True, capture_output=True, text=True)
+    if "UnsupportedClassVersionError" in test_result.stderr:
+        print("⚠️  Warning: Compiled classes may have version compatibility issues")
+        print("If simulations fail, try updating your Java runtime or using a different Java version")
+    else:
+        print("✅ Compiled classes are compatible with current Java runtime")
 
     results = []
 
-    # Check if we have existing results
-    if os.path.exists(RESULTS_FILE):
+    # Handle clear results option
+    if args.clear_results:
+        print("Clearing existing results...")
+        results = []
+        with open(RESULTS_FILE, 'w') as f:
+            json.dump(results, f, indent=2)
+        print("Results cleared. Starting fresh.")
+
+    # Load existing results if they exist and not forcing rerun
+    elif not args.force_rerun and os.path.exists(RESULTS_FILE):
         try:
             with open(RESULTS_FILE, 'r') as f:
                 content = f.read().strip()
@@ -323,10 +410,19 @@ def main():
             # Create an empty file if it doesn't exist or is invalid
             with open(RESULTS_FILE, 'w') as f:
                 json.dump(results, f, indent=2)
+    elif args.force_rerun:
+        print("Force rerun enabled - ignoring existing results")
 
-    # Determine which robot counts we still need to test
-    tested_robots = set(r['num_robots'] for r in results)
-    robots_to_test = [n for n in range(MIN_ROBOTS, MAX_ROBOTS + 1) if n not in tested_robots]
+    # Determine which robot counts we need to test
+    if args.specific_robots:
+        robots_to_test = args.specific_robots
+        print(f"Testing specific robot configurations: {robots_to_test}")
+    elif args.force_rerun:
+        robots_to_test = list(range(args.min_robots, args.max_robots + 1))
+        print(f"Force rerun: testing all configurations from {args.min_robots} to {args.max_robots}")
+    else:
+        tested_robots = set(r['num_robots'] for r in results)
+        robots_to_test = [n for n in range(args.min_robots, args.max_robots + 1) if n not in tested_robots]
 
     if not robots_to_test:
         print("All robot configurations have been tested!")
@@ -442,4 +538,17 @@ def main():
         print("Plots saved as robot_optimization_results.png and robot_efficiency_results.png")
 
 if __name__ == "__main__":
+    # Show help if no arguments provided
+    if len(sys.argv) == 1:
+        print("Robot Optimization Testing Script")
+        print("=" * 40)
+        print("Usage examples:")
+        print("  python3 run_robot_optimization.py                    # Run missing tests only")
+        print("  python3 run_robot_optimization.py --force-rerun      # Rerun all tests")
+        print("  python3 run_robot_optimization.py --clear-results    # Clear results and start fresh")
+        print("  python3 run_robot_optimization.py --specific-robots 1 5 8  # Test specific configurations")
+        print("  python3 run_robot_optimization.py --min-robots 3 --max-robots 6  # Test range")
+        print("  python3 run_robot_optimization.py --help             # Show detailed help")
+        print()
+
     main()

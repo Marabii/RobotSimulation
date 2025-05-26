@@ -371,9 +371,19 @@ public class MySimFactory extends SimFactory {
     }
 
     public static void main(String[] args) throws Exception {
-        // Load main config
-        IniFile ifile = new IniFile("parameters/configuration.ini");
-        IniFile ifilenv = new IniFile("parameters/environment.ini");
+        // Load main config - try both locations for compatibility
+        IniFile ifile;
+        IniFile ifilenv;
+
+        try {
+            // Try new location first
+            ifile = new IniFile("secondSimulation/parameters/configuration.ini");
+            ifilenv = new IniFile("secondSimulation/parameters/environment.ini");
+        } catch (Exception e) {
+            // Fallback to old location
+            ifile = new IniFile("parameters/configuration.ini");
+            ifilenv = new IniFile("parameters/environment.ini");
+        }
 
         // Simulation properties
         SimProperties sp = new SimProperties(ifile);
